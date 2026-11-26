@@ -1,0 +1,8 @@
+{
+  "name": "Dashboard Keuangan Pribadi",
+  "description": "Dashboard analisis keuangan pribadi interaktif dengan dukungan impor & ekspor Excel/CSV, laporan PDF, arus kas harian, dan pelacakan investasi serta valas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
