@@ -107,7 +107,7 @@ export const ImportSpreadsheetModal: React.FC<ImportSpreadsheetModalProps> = ({
               Import dari Spreadsheet (.xlsx / .xls / .csv)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Mendukung Template Excel Artha, ekspor aplikasi pencatat keuangan, maupun tabel spreadsheet kustom dengan kolom Masuk/Keluar terpisah.
+              Mendukung Template Excel 101Financial, ekspor aplikasi pencatat keuangan, maupun tabel spreadsheet kustom dengan kolom Masuk/Keluar terpisah.
             </p>
           </div>
           <button

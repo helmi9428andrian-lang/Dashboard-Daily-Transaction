@@ -6,6 +6,7 @@ import {
   Menu,
   Moon,
   Plus,
+  RefreshCw,
   Sparkles,
   Sun,
   Upload,
@@ -155,6 +156,7 @@ export default function App() {
   const [liveFx, setLiveFx] = useState<Record<string, MarketQuote>>({});
   const [ihsgQuote, setIhsgQuote] = useState<MarketQuote | null>(null);
   const [isSyncingLive, setIsSyncingLive] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [autoTrackLive, setAutoTrackLive] = useState(true);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<{
@@ -322,7 +324,7 @@ export default function App() {
   }, [transactions, watchlist]);
 
   const fxCodes = useMemo(() => {
-    const codes = new Set<string>(['USD', 'SGD', 'JPY', 'GBP', 'EUR']);
+    const codes = new Set<string>(['USD', 'SGD', 'JPY', 'GBP', 'EUR', 'AUD', 'MYR', 'CNY', 'HKD']);
     for (const r of transactions) {
       if (r.type !== 3) continue;
       const j = r.category || '';
@@ -367,7 +369,7 @@ export default function App() {
         });
         setLastSyncAt(nowStr);
 
-        // Auto-sync live IDX stock prices into portfolio config.prices & optionally FX into config.kurs
+        // Auto-sync live IDX stock prices and BNI e-Rate FX quotes into portfolio config
         setConfig((prev) => {
           let pricesChanged = false;
           const nextPrices = { ...prev.prices };
@@ -384,25 +386,38 @@ export default function App() {
             }
           }
 
-          if (!syncKursToo && !pricesChanged) return prev;
-
+          let kursChanged = false;
           const nextKurs = { ...prev.kurs };
-          if (syncKursToo) {
-            const ts = `${new Date().toLocaleDateString('id-ID')} ${new Date().toLocaleTimeString('id-ID', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })}`;
-            for (const [code, q] of Object.entries(fx)) {
-              if (q && q.price > 0) {
-                const decimals = code === 'JPY' ? 2 : 0;
-                const factor = 10 ** decimals;
-                const spot = Math.round(q.price * factor) / factor;
-                const sell = Math.round(q.price * 1.006 * factor) / factor;
-                const buy = Math.round(q.price * 0.994 * factor) / factor;
-                nextKurs[code] = { b: buy || spot, j: sell || spot, ts: `${ts} (Live)` };
-              }
+          const fallbackTs = `${new Date().toLocaleDateString('id-ID')} ${new Date().toLocaleTimeString('id-ID', {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}`;
+
+          for (const [code, q] of Object.entries(fx)) {
+            if (!q || !(q.price > 0)) continue;
+            const hasBniPair = typeof q.buy === 'number' && q.buy > 0 && typeof q.sell === 'number' && q.sell > 0;
+            if (!hasBniPair && !syncKursToo) continue;
+
+            const decimals = code === 'JPY' || code === 'KRW' || code === 'THB' ? 2 : 0;
+            const factor = 10 ** decimals;
+            const nextSell = hasBniPair
+              ? Math.round((q.sell as number) * 100) / 100
+              : Math.round(q.price * 1.006 * factor) / factor;
+            const nextBuy = hasBniPair
+              ? Math.round((q.buy as number) * 100) / 100
+              : Math.round(q.price * 0.994 * factor) / factor;
+            const nextTs = hasBniPair
+              ? `${q.rateUpdatedAt || fallbackTs} (BNI e-Rate)`
+              : `${fallbackTs} (Live)`;
+
+            const existing = prev.kurs[code];
+            if (!existing || existing.b !== nextBuy || existing.j !== nextSell || existing.ts !== nextTs) {
+              nextKurs[code] = { b: nextBuy, j: nextSell, ts: nextTs };
+              kursChanged = true;
             }
           }
+
+          if (!pricesChanged && !kursChanged) return prev;
 
           return {
             ...prev,
@@ -412,7 +427,7 @@ export default function App() {
         });
 
         if (syncKursToo) {
-          notify('success', 'Kurs valas & harga saham IHSG berhasil disinkronkan dari pasar live.');
+          notify('success', 'Kurs BNI (e-Rate) & harga saham IHSG live berhasil disinkronkan.');
         }
       } catch {
         if (syncKursToo) {
@@ -700,6 +715,28 @@ export default function App() {
     notify('info', `Akun template "${name}" dihapus dari daftar.`);
   };
 
+  const handleRefreshDashboard = async () => {
+    setIsRefreshing(true);
+    try {
+      const latestRaw = localStorage.getItem(LS_TX_KEY);
+      if (latestRaw !== null) {
+        const parsed = JSON.parse(latestRaw) as Transaction[];
+        if (Array.isArray(parsed)) {
+          setTransactions(parsed);
+          if (preset !== 'custom') {
+            setPeriod(resolvePresetRange(preset, parsed));
+          }
+        }
+      }
+    } catch {
+      // Ignore storage parse error
+    }
+    setHighlightedDay(null);
+    await fetchLiveMarketData(false);
+    setTimeout(() => setIsRefreshing(false), 300);
+    notify('success', 'Data dashboard & kuotasi pasar live berhasil diperbarui.');
+  };
+
   return (
     <div className="min-h-screen flex bg-[#F6F7FB] dark:bg-[#0B0F1A] text-slate-900 dark:text-slate-100">
       <Sidebar
@@ -733,6 +770,20 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void handleRefreshDashboard()}
+              disabled={isRefreshing || isSyncingLive}
+              aria-label="Refresh dashboard"
+              title="Refresh data & harga pasar live"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${isRefreshing || isSyncingLive ? 'animate-spin' : ''}`}
+              />
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+
             <button
               type="button"
               onClick={() => setIsDark((d) => !d)}
@@ -1060,6 +1111,7 @@ export default function App() {
         watchlist={watchlist}
         kurs={config.kurs}
         liveQuotes={liveQuotes}
+        liveFx={liveFx}
         onAddAccountTemplate={handleAddAccountTemplate}
         onSave={handleSaveTx}
         onClose={() => {

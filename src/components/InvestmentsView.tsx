@@ -10,6 +10,7 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
+import { FormattedNumberInput } from './FormattedNumberInput';
 import type {
   AccountFlow,
   AppConfig,
@@ -147,14 +148,21 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
 
             <div>
               <span className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Kurs USD Spot
+                Kurs BNI e-Rate (USD)
               </span>
-              <div className="mt-1 flex items-baseline gap-2">
+              <div className="mt-1 flex flex-wrap items-baseline gap-2">
                 <span className="text-base font-bold font-mono-num tabular-nums text-slate-900 dark:text-white">
-                  {liveFx.USD ? formatRp(liveFx.USD.price) : formatRp(config.kurs.USD?.j || 0)}
+                  Jual {formatRp(liveFx.USD?.sell || liveFx.USD?.price || config.kurs.USD?.j || 0)}
+                </span>
+                <span className="text-xs font-mono-num tabular-nums text-slate-600 dark:text-slate-300">
+                  · Beli {formatRp(liveFx.USD?.buy || config.kurs.USD?.b || 0)}
                 </span>
                 <span className="text-xs text-slate-500 dark:text-slate-400">
-                  {lastSyncAt ? `Update ${lastSyncAt}` : 'Belum disinkronkan'}
+                  {liveFx.USD?.rateUpdatedAt
+                    ? `· ${liveFx.USD.rateUpdatedAt}`
+                    : lastSyncAt
+                      ? `· Update ${lastSyncAt}`
+                      : ''}
                 </span>
               </div>
             </div>
@@ -334,19 +342,21 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                             </div>
                             {liveRate && (
                               <div className="text-xs text-indigo-600 dark:text-indigo-400">
-                                Spot: {formatRp(liveRate.price)}
+                                {liveRate.source === 'BNI e-Rate'
+                                  ? `BNI Live: Beli ${formatRp(liveRate.buy || liveRate.price)}`
+                                  : `Spot: ${formatRp(liveRate.price)}`}
                               </div>
                             )}
                           </div>
                         ) : (
                           <div className="inline-flex flex-col items-end gap-0.5">
-                            <input
-                              type="number"
-                              step="any"
+                            <FormattedNumberInput
+                              allowDecimal
                               value={config.prices[x.key] || ''}
                               placeholder="Harga"
-                              onChange={(e) => onUpdatePrice(x.key, Number(e.target.value) || 0)}
-                              className="w-28 text-right bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              onValueChange={(_str, num) => onUpdatePrice(x.key, num)}
+                              className="inline-flex"
+                              inputClassName="w-28 text-right bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                             />
                             {liveStock && (
                               <span
@@ -560,10 +570,10 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Referensi Kurs Valas ({currencies.join(', ')})
+                Referensi Kurs BNI e-Rate ({currencies.join(', ')})
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Nilai aset valas dihitung dari Kurs Jual. Sinkronkan dari kurs pasar live atau ubah manual sesuai situs BNI.
+                Nilai aset valas dihitung dari Kurs Jual BNI. Tersinkron otomatis dari kurs BNI (e-Rate) live atau dapat disesuaikan manual.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -574,7 +584,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl bg-slate-900 dark:bg-indigo-600 hover:bg-slate-800 dark:hover:bg-indigo-700 text-white disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSyncingLive ? 'animate-spin' : ''}`} />
-                <span>Sync Kurs Live</span>
+                <span>Sync Kurs BNI</span>
               </button>
               <a
                 href="https://www.bni.co.id/id-id/beranda/informasi-valas"
@@ -593,7 +603,7 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
               <thead>
                 <tr className="border-b border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-500 dark:text-slate-400">
                   <th className="py-2 px-2 text-left">Mata Uang</th>
-                  <th className="py-2 px-2 text-right">Kurs Spot Live</th>
+                  <th className="py-2 px-2 text-right">Kurs BNI Live</th>
                   <th className="py-2 px-2 text-right">Kurs Jual</th>
                   <th className="py-2 px-2 text-right">Kurs Beli</th>
                   <th className="py-2 px-2 text-right">Selisih</th>
@@ -620,24 +630,30 @@ export const InvestmentsView: React.FC<InvestmentsViewProps> = ({
                         </span>
                       </td>
                       <td className="py-2 px-2 text-right font-mono-num tabular-nums text-xs text-indigo-600 dark:text-indigo-400 font-semibold">
-                        {spot ? formatRp(spot.price) : '—'}
+                        {spot
+                          ? spot.buy && spot.sell
+                            ? `J ${formatRp(spot.sell)} / B ${formatRp(spot.buy)}`
+                            : formatRp(spot.price)
+                          : '—'}
                       </td>
                       <td className="py-2 px-2 text-right">
-                        <input
-                          type="number"
-                          step="any"
+                        <FormattedNumberInput
+                          allowDecimal
+                          aria-label={`Kurs jual ${code}`}
                           value={k.j || ''}
-                          onChange={(e) => onUpdateKurs(code, 'j', Number(e.target.value) || 0)}
-                          className="w-28 text-right bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          onValueChange={(_str, num) => onUpdateKurs(code, 'j', num)}
+                          className="inline-flex"
+                          inputClassName="w-28 text-right bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                         />
                       </td>
                       <td className="py-2 px-2 text-right">
-                        <input
-                          type="number"
-                          step="any"
+                        <FormattedNumberInput
+                          allowDecimal
+                          aria-label={`Kurs beli ${code}`}
                           value={k.b || ''}
-                          onChange={(e) => onUpdateKurs(code, 'b', Number(e.target.value) || 0)}
-                          className="w-28 text-right bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          onValueChange={(_str, num) => onUpdateKurs(code, 'b', num)}
+                          className="inline-flex"
+                          inputClassName="w-28 text-right bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1 text-xs font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                         />
                       </td>
                       <td className="py-2 px-2 text-right font-mono-num tabular-nums text-slate-600 dark:text-slate-400">

@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, X } from 'lucide-react';
+import { FormattedNumberInput } from './FormattedNumberInput';
 import type {
   AccountGroup,
   AccountTemplateItem,
@@ -16,6 +17,7 @@ import {
 } from '../utils/financeEngine';
 import {
   formatForeignCurrency,
+  formatRp,
   getCurrencyInfo,
   nowTimeHHMM,
   todayISO,
@@ -37,6 +39,7 @@ interface TransactionModalProps {
   watchlist?: string[];
   kurs: KursMap;
   liveQuotes?: Record<string, MarketQuote>;
+  liveFx?: Record<string, MarketQuote>;
   onAddAccountTemplate: (item: AccountTemplateItem) => void;
   onSave: (txData: Omit<Transaction, 'id'>, editId: string | null) => void;
   onClose: () => void;
@@ -77,6 +80,14 @@ function inferAccountGroup(name: string): AccountGroup {
   return 'Bank';
 }
 
+function formatConvertedValasUnit(rpAmount: number, rate: number): string {
+  if (!(rpAmount > 0) || !(rate > 0)) return '';
+  const raw = rpAmount / rate;
+  const factor = raw < 1 ? 10000 : 100;
+  const rounded = Math.round(raw * factor) / factor;
+  return rounded > 0 ? String(rounded) : '';
+}
+
 export const TransactionModal: React.FC<TransactionModalProps> = ({
   open,
   editingTx,
@@ -87,6 +98,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   watchlist = [],
   kurs,
   liveQuotes = {},
+  liveFx = {},
   onAddAccountTemplate,
   onSave,
   onClose,
@@ -113,6 +125,11 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   const [unit, setUnit] = useState('');
   const [price, setPrice] = useState('');
   const [fetchingPrice, setFetchingPrice] = useState(false);
+  const [priceManuallyEdited, setPriceManuallyEdited] = useState(false);
+  const [lastEditedValasField, setLastEditedValasField] = useState<'amount' | 'unit'>('amount');
+
+  const latestValuesRef = useRef({ amount, unit, lastEditedValasField });
+  latestValuesRef.current = { amount, unit, lastEditedValasField };
 
   // Merge account templates + all accounts already used in existing transactions
   const groupedAccounts = useMemo(() => {
@@ -219,6 +236,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       setAction(editingTx.action === -1 ? -1 : 1);
       setUnit(editingTx.unit != null ? String(editingTx.unit) : '');
       setPrice(editingTx.price != null ? String(editingTx.price) : '');
+      setPriceManuallyEdited(true);
+      setLastEditedValasField('unit');
     } else {
       setType(initialType);
       setDate(todayISO());
@@ -241,26 +260,101 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           ? String(prefillInvest.price)
           : '';
       setPrice(prePrice);
+      setPriceManuallyEdited(false);
+      setLastEditedValasField('amount');
       if (prefillInvest && /^saham$/i.test(prefillInvest.category) && prefillInvest.price) {
         setAmount(String(Math.round(100 * prefillInvest.price)));
       }
     }
   }, [open, editingTx, initialType, prefillInvest]);
 
+  // Automatically populate live BNI e-Rate & convert Valas whenever currency/action changes
+  useEffect(() => {
+    if (!open || priceManuallyEdited) return;
+    if (type !== 3 || !/^valas$/i.test(category.trim())) return;
+
+    const code = subcategory.trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(code)) return;
+
+    const applyLiveRate = (rate: number) => {
+      if (!(rate > 0)) return;
+      setPrice(String(rate));
+      const { amount: curAmt, unit: curUnit, lastEditedValasField: lastField } =
+        latestValuesRef.current;
+      const amtNum = Number(curAmt);
+      const unitNum = Number(curUnit);
+      if (lastField === 'unit' && unitNum > 0) {
+        setAmount(String(Math.round(unitNum * rate)));
+      } else if (amtNum > 0) {
+        setUnit(formatConvertedValasUnit(amtNum, rate));
+      } else if (unitNum > 0) {
+        setAmount(String(Math.round(unitNum * rate)));
+      }
+    };
+
+    const live = liveFx[code];
+    const saved = kurs[code];
+    const directRate =
+      action === -1
+        ? live?.buy && live.buy > 0
+          ? live.buy
+          : saved?.b && saved.b > 0
+            ? saved.b
+            : live?.price
+        : live?.sell && live.sell > 0
+          ? live.sell
+          : live?.price && live.price > 0
+            ? live.price
+            : saved?.j;
+
+    if (directRate && directRate > 0) {
+      applyLiveRate(directRate);
+      return;
+    }
+
+    let cancelled = false;
+    setFetchingPrice(true);
+    fetch(`/api/market/quotes?fx=${encodeURIComponent(code)}`)
+      .then((r) => r.json())
+      .then((json: { fx?: Record<string, MarketQuote> }) => {
+        if (cancelled) return;
+        const q = json.fx?.[code];
+        const fetchedRate = action === -1 ? q?.buy || q?.price : q?.sell || q?.price;
+        if (fetchedRate && fetchedRate > 0) {
+          applyLiveRate(Math.round(fetchedRate * 100) / 100);
+        }
+      })
+      .catch(() => {
+        // Silent fallback when offline
+      })
+      .finally(() => {
+        if (!cancelled) setFetchingPrice(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, type, category, subcategory, action, priceManuallyEdited, liveFx, kurs]);
+
   if (!open) return null;
 
   const isValas = type === 3 && /^valas$/i.test(category.trim());
   const isSaham = type === 3 && /^saham$/i.test(category.trim());
-  const valasMeta = isValas ? getCurrencyInfo(subcategory) : null;
+  const valasCode = subcategory.trim().toUpperCase();
+  const valasMeta = isValas && valasCode ? getCurrencyInfo(valasCode) : null;
+  const activeLiveFx = isValas && valasCode ? liveFx[valasCode] : undefined;
 
   const handleTypeSwitch = (nextType: TransactionType) => {
     setType(nextType);
     setIsCustomCategory(false);
     setIsCustomSubcategory(false);
+    setPriceManuallyEdited(false);
     if (!editingTx) {
       if (nextType === 3) {
         setCategory('Saham');
         setSubcategory('');
+        setPrice('');
+        setUnit('');
       } else {
         setCategory('');
         setSubcategory('');
@@ -268,13 +362,43 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     }
   };
 
-  const handleUnitOrPriceChange = (nextUnit: string, nextPrice: string) => {
+  const handleAmountChange = (nextAmount: string) => {
+    setAmount(nextAmount);
+    setLastEditedValasField('amount');
+    if (isValas) {
+      const amt = Number(nextAmount);
+      const p = Number(price);
+      if (amt > 0 && p > 0) {
+        setUnit(formatConvertedValasUnit(amt, p));
+      } else if (!nextAmount || amt <= 0) {
+        setUnit('');
+      }
+    }
+  };
+
+  const handleUnitChange = (nextUnit: string) => {
     setUnit(nextUnit);
-    setPrice(nextPrice);
+    setLastEditedValasField('unit');
     const u = Number(nextUnit);
-    const p = Number(nextPrice);
+    const p = Number(price);
     if (type === 3 && u > 0 && p > 0) {
       setAmount(String(Math.round(u * p)));
+    } else if (isValas && (!nextUnit || u <= 0)) {
+      setAmount('');
+    }
+  };
+
+  const handlePriceChange = (nextPrice: string, isManual = true) => {
+    setPrice(nextPrice);
+    if (isManual) setPriceManuallyEdited(true);
+    const p = Number(nextPrice);
+    if (!(p > 0)) return;
+    if (isValas && lastEditedValasField === 'amount' && Number(amount) > 0) {
+      setUnit(formatConvertedValasUnit(Number(amount), p));
+    } else if (type === 3 && Number(unit) > 0) {
+      setAmount(String(Math.round(Number(unit) * p)));
+    } else if (isValas && Number(amount) > 0) {
+      setUnit(formatConvertedValasUnit(Number(amount), p));
     }
   };
 
@@ -284,26 +408,40 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       onNotify('info', 'Pilih atau masukkan kode mata uang terlebih dahulu (mis. USD, SGD, JPY).');
       return;
     }
-    const entry = kurs[code];
-    const rate = action === -1 ? entry?.b : entry?.j;
-    if (rate && rate > 0) {
-      handleUnitOrPriceChange(unit, String(rate));
-      return;
-    }
 
+    setPriceManuallyEdited(false);
     setFetchingPrice(true);
     try {
       const resp = await fetch(`/api/market/quotes?fx=${encodeURIComponent(code)}`);
       const json = (await resp.json()) as { fx?: Record<string, MarketQuote> };
-      const spot = json.fx?.[code]?.price;
-      if (spot && spot > 0) {
-        handleUnitOrPriceChange(unit, String(Math.round(spot)));
-        onNotify('success', `Kurs ${code} diambil dari pasar live.`);
+      const q = json.fx?.[code];
+      const liveRate = action === -1 ? q?.buy || q?.price : q?.sell || q?.price;
+      const savedEntry = kurs[code];
+      const rate =
+        liveRate && liveRate > 0
+          ? Math.round(liveRate * 100) / 100
+          : action === -1
+            ? savedEntry?.b
+            : savedEntry?.j;
+
+      if (rate && rate > 0) {
+        handlePriceChange(String(rate), false);
+        onNotify(
+          'success',
+          `Kurs ${action === -1 ? 'Beli' : 'Jual'} BNI ${code}: ${formatRp(rate)}${q?.rateUpdatedAt ? ` (${q.rateUpdatedAt})` : ''}.`
+        );
       } else {
         onNotify('info', `Kurs untuk ${code} belum tersedia.`);
       }
     } catch {
-      onNotify('error', 'Gagal mengambil kurs live.');
+      const entry = kurs[code];
+      const fallbackRate = action === -1 ? entry?.b : entry?.j;
+      if (fallbackRate && fallbackRate > 0) {
+        handlePriceChange(String(fallbackRate), false);
+        onNotify('info', `Menggunakan referensi kurs lokal BNI ${code}.`);
+      } else {
+        onNotify('error', 'Gagal mengambil kurs BNI live.');
+      }
     } finally {
       setFetchingPrice(false);
     }
@@ -317,7 +455,12 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
     }
     const cached = liveQuotes[ticker];
     if (cached && cached.price > 0) {
-      handleUnitOrPriceChange(unit || '100', String(Math.round(cached.price)));
+      const nextUnit = unit || '100';
+      setUnit(nextUnit);
+      handlePriceChange(String(Math.round(cached.price)), false);
+      if (Number(nextUnit) > 0) {
+        setAmount(String(Math.round(Number(nextUnit) * Math.round(cached.price))));
+      }
       return;
     }
 
@@ -327,11 +470,14 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       const json = (await resp.json()) as { quotes?: Record<string, MarketQuote> };
       const quote = json.quotes?.[ticker];
       if (quote && quote.price > 0) {
-        handleUnitOrPriceChange(unit || '100', String(Math.round(quote.price)));
-        onNotify(
-          'success',
-          `Harga live ${ticker}: Rp${Math.round(quote.price).toLocaleString('id-ID')}`
-        );
+        const rounded = Math.round(quote.price);
+        const nextUnit = unit || '100';
+        setUnit(nextUnit);
+        handlePriceChange(String(rounded), false);
+        if (Number(nextUnit) > 0) {
+          setAmount(String(Math.round(Number(nextUnit) * rounded)));
+        }
+        onNotify('success', `Harga live ${ticker}: ${formatRp(rounded)}`);
       } else {
         onNotify('info', `Harga live untuk ${ticker} tidak ditemukan.`);
       }
@@ -400,6 +546,8 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
 
   const [lblAccount, lblCategory, lblSubcategory] = FIELD_LABELS[type];
   const parsedUnit = Number(unit);
+  const parsedPrice = Number(price);
+  const parsedAmount = Number(amount);
 
   const accountSelectVal = isCustomAccount
     ? CUSTOM_VAL
@@ -516,7 +664,10 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                 </span>
                 <select
                   value={String(action)}
-                  onChange={(e) => setAction(e.target.value === '-1' ? -1 : 1)}
+                  onChange={(e) => {
+                    setAction(e.target.value === '-1' ? -1 : 1);
+                    setPriceManuallyEdited(false);
+                  }}
                   className="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 >
                   <option value="1">Beli</option>
@@ -626,14 +777,18 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     value={categorySelectVal}
                     onChange={(e) => {
                       const v = e.target.value;
+                      setPriceManuallyEdited(false);
                       if (v === CUSTOM_VAL) {
                         setIsCustomCategory(true);
                         setCategory('');
                       } else {
                         setIsCustomCategory(false);
                         setCategory(v);
-                        setSubcategory('');
+                        setSubcategory(/^valas$/i.test(v) ? 'USD' : '');
                         setIsCustomSubcategory(false);
+                        if (!/^valas$/i.test(v)) {
+                          setPrice('');
+                        }
                       }
                     }}
                     className="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -722,6 +877,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     value={subcategorySelectVal}
                     onChange={(e) => {
                       const v = e.target.value;
+                      setPriceManuallyEdited(false);
                       if (v === CUSTOM_VAL) {
                         setIsCustomSubcategory(true);
                         setSubcategory('');
@@ -755,52 +911,56 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     required={type === 3}
                     value={subcategory}
                     placeholder={type === 3 ? 'mis. BBCA, USD, Antam' : 'Nama subkategori baru'}
-                    onChange={(e) => setSubcategory(e.target.value)}
+                    onChange={(e) => {
+                      setPriceManuallyEdited(false);
+                      setSubcategory(e.target.value);
+                    }}
                     className="mt-2 w-full bg-slate-50 dark:bg-[#0B0F1A] border border-indigo-300 dark:border-indigo-700 rounded-xl px-3 py-1.5 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 )}
               </div>
             )}
 
-            <label className={`block ${type === 2 ? 'sm:col-span-2' : ''}`}>
-              <span className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                Total Nominal (Rp)
-              </span>
-              <input
-                type="number"
-                required
-                min={1}
-                step={1}
-                inputMode="numeric"
-                value={amount}
-                placeholder="0"
-                onChange={(e) => setAmount(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </label>
+            <div className={`block ${type === 2 ? 'sm:col-span-2' : ''}`}>
+              <label className="block">
+                <span className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                  Total Nominal (Rp)
+                </span>
+                <FormattedNumberInput
+                  prefix="Rp"
+                  required
+                  min={1}
+                  value={amount}
+                  placeholder="0"
+                  onValueChange={handleAmountChange}
+                  inputClassName="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </label>
+            </div>
 
             {type === 3 && (
               <>
-                <label className="block">
-                  <span className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                    {isValas && valasMeta
-                      ? `Jumlah ${valasMeta.code} (${valasMeta.symbol.trim()})`
-                      : isSaham
-                        ? 'Jumlah Lembar (1 lot = 100 lbr)'
-                        : 'Jumlah Unit'}
-                  </span>
-                  <input
-                    type="number"
-                    required
-                    step="any"
-                    min={0}
-                    value={unit}
-                    onChange={(e) => handleUnitOrPriceChange(e.target.value, price)}
-                    className="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+                <div className="block">
+                  <label className="block">
+                    <span className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      {isValas && valasMeta
+                        ? `Jumlah ${valasMeta.code} (${valasMeta.symbol.trim()})`
+                        : isSaham
+                          ? 'Jumlah Lembar (1 lot = 100 lbr)'
+                          : 'Jumlah Unit'}
+                    </span>
+                    <FormattedNumberInput
+                      allowDecimal
+                      required
+                      value={unit}
+                      placeholder="0"
+                      onValueChange={handleUnitChange}
+                      inputClassName="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </label>
                   {isValas && valasMeta && parsedUnit > 0 && (
-                    <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
-                      Setara: {formatForeignCurrency(parsedUnit, valasMeta.code)} {valasMeta.code}
+                    <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400 font-mono-num tabular-nums">
+                      Hasil konversi: {formatForeignCurrency(parsedUnit, valasMeta.code)} {valasMeta.code}
                     </span>
                   )}
                   {isSaham && parsedUnit > 0 && (
@@ -808,26 +968,61 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                       Setara: {(parsedUnit / 100).toLocaleString('id-ID')} lot
                     </span>
                   )}
-                </label>
+                </div>
 
-                <label className="block">
-                  <span className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                    {isValas && valasMeta
-                      ? `Kurs per 1 ${valasMeta.code} (Rp)`
-                      : isSaham
-                        ? 'Harga per Lembar (Rp)'
-                        : 'Harga / Kurs per Unit (Rp)'}
-                  </span>
-                  <input
-                    type="number"
-                    required
-                    step="any"
-                    min={0}
-                    value={price}
-                    onChange={(e) => handleUnitOrPriceChange(unit, e.target.value)}
-                    className="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                </label>
+                <div className="block">
+                  <label className="block">
+                    <span className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      {isValas && valasMeta
+                        ? `Kurs ${action === -1 ? 'Beli' : 'Jual'} per 1 ${valasMeta.code} (Rp)`
+                        : isSaham
+                          ? 'Harga per Lembar (Rp)'
+                          : 'Harga / Kurs per Unit (Rp)'}
+                    </span>
+                    <FormattedNumberInput
+                      prefix="Rp"
+                      allowDecimal
+                      required
+                      value={price}
+                      placeholder="0"
+                      onValueChange={(str) => handlePriceChange(str, true)}
+                      inputClassName="w-full bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-sm font-mono-num tabular-nums text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </label>
+                </div>
+
+                {isValas && valasMeta && (
+                  <div className="sm:col-span-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0B0F1A] px-3.5 py-2.5 space-y-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">
+                        {activeLiveFx?.source === 'BNI e-Rate'
+                          ? `Kurs BNI e-Rate (${valasMeta.code})`
+                          : `Referensi Kurs ${valasMeta.code}`}
+                      </span>
+                      <span className="font-mono-num tabular-nums text-slate-600 dark:text-slate-300">
+                        {activeLiveFx?.buy && activeLiveFx?.sell
+                          ? `Jual ${formatRp(activeLiveFx.sell)} · Beli ${formatRp(activeLiveFx.buy)}`
+                          : parsedPrice > 0
+                            ? `${formatRp(parsedPrice)} / 1 ${valasMeta.code}`
+                            : fetchingPrice
+                              ? 'Mengambil kurs BNI…'
+                              : 'Belum ada kurs'}
+                      </span>
+                    </div>
+                    {parsedPrice > 0 && (parsedAmount > 0 || parsedUnit > 0) && (
+                      <div className="text-xs font-mono-num tabular-nums font-semibold text-indigo-600 dark:text-indigo-400">
+                        {parsedAmount > 0 && parsedUnit > 0
+                          ? `${action === -1 ? 'Jual' : 'Beli'}: ${formatRp(parsedAmount)} ⇄ ${formatForeignCurrency(parsedUnit, valasMeta.code)} ${valasMeta.code}`
+                          : ''}
+                      </div>
+                    )}
+                    {activeLiveFx?.rateUpdatedAt && (
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Update BNI: {activeLiveFx.rateUpdatedAt}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="sm:col-span-2 flex flex-wrap gap-2">
                   {isSaham ? (
@@ -851,7 +1046,7 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${fetchingPrice ? 'animate-spin' : ''}`} />
                       <span>
-                        Isi dari Kurs ({subcategory.trim().toUpperCase() || 'Valas'})
+                        Perbarui Kurs BNI Live ({subcategory.trim().toUpperCase() || 'Valas'})
                       </span>
                     </button>
                   )}

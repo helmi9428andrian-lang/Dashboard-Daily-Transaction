@@ -17,6 +17,22 @@ interface CachedQuote {
   currency: string;
   marketTime: number;
   name: string;
+  buy?: number;
+  sell?: number;
+  source?: string;
+  rateUpdatedAt?: string;
+}
+
+interface BniRateEntry {
+  buy: number;
+  sell: number;
+  buyChange: number;
+  sellChange: number;
+}
+
+interface BniRatesPayload {
+  updatedAt: string;
+  rates: Record<string, BniRateEntry>;
 }
 
 interface CacheEntry<T> {
@@ -26,8 +42,109 @@ interface CacheEntry<T> {
 
 const quoteCache = new Map<string, CacheEntry<CachedQuote>>();
 let fxRatesCache: CacheEntry<Record<string, number>> | null = null;
+let bniRatesCache: CacheEntry<BniRatesPayload> | null = null;
 
 const SYMBOL_RE = /^[A-Z0-9.^=-]{1,18}$/;
+
+function parseIdNumber(str: string): number {
+  const normalized = str.replace(/\./g, '').replace(',', '.');
+  const val = Number(normalized);
+  return Number.isFinite(val) ? val : NaN;
+}
+
+function parseBniRateCell(cell: string): { rate: number; change: number } | null {
+  const cleaned = cell.trim();
+  const mainMatch = cleaned.match(/^([\d.,]+)/);
+  if (!mainMatch) return null;
+  const rate = parseIdNumber(mainMatch[1]);
+  if (!(rate > 0)) return null;
+
+  let change = 0;
+  const deltaMatch = cleaned.match(/\(\s*([+-])\s*([\d.,]+)\s*\)/);
+  if (deltaMatch) {
+    const absDelta = parseIdNumber(deltaMatch[2]);
+    if (Number.isFinite(absDelta)) {
+      change = deltaMatch[1] === '-' ? -absDelta : absDelta;
+    }
+  }
+  return { rate, change };
+}
+
+async function fetchBniLiveRates(): Promise<BniRatesPayload> {
+  const now = Date.now();
+  if (bniRatesCache && bniRatesCache.expiresAt > now) {
+    return bniRatesCache.data;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6500);
+
+  try {
+    const resp = await fetch('https://kursdollar.org/bank/bni.php', {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; 101Financial/1.0)',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+    });
+    if (!resp.ok) return bniRatesCache?.data || { updatedAt: '', rates: {} };
+    const html = await resp.text();
+    const idx = html.indexOf('>e-Rate<');
+    if (idx < 0) return bniRatesCache?.data || { updatedAt: '', rates: {} };
+
+    const sub = html.slice(idx, idx + 8000);
+    const trs = [...sub.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+    if (trs.length < 3) return bniRatesCache?.data || { updatedAt: '', rates: {} };
+
+    const extractCells = (trHtml: string) =>
+      [...trHtml.matchAll(/<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/gi)].map((m) =>
+        m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      );
+
+    const headerCells = extractCells(trs[0][1]);
+    const codes = headerCells
+      .map((c) => {
+        const m = c.match(/\(\s*([A-Z]{3})\s*\)/);
+        return m ? m[1] : '';
+      })
+      .filter(Boolean);
+
+    const beliCells = extractCells(trs[1][1]);
+    const jualCells = extractCells(trs[2][1]);
+    if (codes.length === 0 || beliCells.length < codes.length || jualCells.length < codes.length) {
+      return bniRatesCache?.data || { updatedAt: '', rates: {} };
+    }
+
+    const updatedAt = beliCells[0] && !/beli/i.test(beliCells[0]) ? beliCells[0] : '';
+    const beliRates = beliCells.slice(-codes.length);
+    const jualRates = jualCells.slice(-codes.length);
+
+    const rates: Record<string, BniRateEntry> = {};
+    codes.forEach((code, i) => {
+      const b = parseBniRateCell(beliRates[i] || '');
+      const j = parseBniRateCell(jualRates[i] || '');
+      if (b && j) {
+        rates[code] = {
+          buy: b.rate,
+          sell: j.rate,
+          buyChange: b.change,
+          sellChange: j.change,
+        };
+      }
+    });
+
+    if (Object.keys(rates).length > 0) {
+      const payload: BniRatesPayload = { updatedAt, rates };
+      bniRatesCache = { data: payload, expiresAt: now + CACHE_TTL_MS };
+      return payload;
+    }
+    return bniRatesCache?.data || { updatedAt: '', rates: {} };
+  } catch {
+    return bniRatesCache?.data || { updatedAt: '', rates: {} };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function fetchTradingViewIdxBatch(
   symbols: string[]
@@ -172,7 +289,7 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
-  // Live market quotes endpoint for IDX/IHSG stocks and Forex -> IDR
+  // Live market quotes endpoint for IDX/IHSG stocks and BNI e-Rate / Forex -> IDR
   app.get('/api/market/quotes', async (req, res) => {
     const rawSymbols = Array.from(
       new Set(
@@ -192,25 +309,48 @@ async function startServer() {
       )
     ).slice(0, 20);
 
-    const [quotes, fxTable] = await Promise.all([
+    const [quotes, bniPayload, fallbackFxTable] = await Promise.all([
       fetchTradingViewIdxBatch(rawSymbols),
+      rawFx.length > 0 ? fetchBniLiveRates() : Promise.resolve({ updatedAt: '', rates: {} } as BniRatesPayload),
       rawFx.length > 0 ? fetchLiveFxRates() : Promise.resolve({} as Record<string, number>),
     ]);
 
     const nowSec = Math.floor(Date.now() / 1000);
     const fx: Record<string, CachedQuote> = {};
     for (const code of rawFx) {
-      const rate = fxTable[code];
-      if (typeof rate === 'number' && rate > 0) {
+      const bni = bniPayload.rates[code];
+      if (bni && bni.sell > 0) {
+        const previousClose = bni.sell - bni.sellChange;
+        const changePercent = previousClose > 0 ? (bni.sellChange / previousClose) * 100 : 0;
         fx[code] = {
           symbol: code,
-          price: rate,
-          previousClose: rate,
+          price: bni.sell,
+          previousClose,
+          change: bni.sellChange,
+          changePercent,
+          currency: 'IDR',
+          marketTime: nowSec,
+          name: `${code}/IDR (BNI e-Rate)`,
+          buy: bni.buy,
+          sell: bni.sell,
+          source: 'BNI e-Rate',
+          rateUpdatedAt: bniPayload.updatedAt,
+        };
+        continue;
+      }
+
+      const spot = fallbackFxTable[code];
+      if (typeof spot === 'number' && spot > 0) {
+        fx[code] = {
+          symbol: code,
+          price: spot,
+          previousClose: spot,
           change: 0,
           changePercent: 0,
           currency: 'IDR',
           marketTime: nowSec,
           name: `${code}/IDR`,
+          source: 'Pasar Spot',
         };
       }
     }
@@ -218,6 +358,7 @@ async function startServer() {
     res.json({
       quotes,
       fx,
+      bniUpdatedAt: bniPayload.updatedAt || null,
       fetchedAt: new Date().toISOString(),
     });
   });

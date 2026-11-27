@@ -47,6 +47,10 @@ export interface MarketQuote {
   currency: string;
   marketTime: number;
   name: string;
+  buy?: number;
+  sell?: number;
+  source?: string;
+  rateUpdatedAt?: string;
 }
 
 export type PeriodPreset =

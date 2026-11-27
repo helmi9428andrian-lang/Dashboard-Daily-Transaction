@@ -37,7 +37,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div>
         <div className="flex items-center justify-between px-2 mb-8">
           <span className="text-xl font-extrabold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0">
-            Artha
+            101Financial
           </span>
           <button
             type="button"

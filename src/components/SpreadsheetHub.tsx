@@ -56,7 +56,7 @@ export const SpreadsheetHub: React.FC<SpreadsheetHubProps> = ({
                 Import Excel / CSV
               </span>
               <span className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 block">
-                Mendukung Template Artha, ekspor aplikasi pencatat keuangan, atau kolom kustom dengan pemetaan otomatis.
+                Mendukung Template 101Financial, ekspor aplikasi pencatat keuangan, atau kolom kustom dengan pemetaan otomatis.
               </span>
             </div>
           </button>
@@ -142,7 +142,7 @@ export const SpreadsheetHub: React.FC<SpreadsheetHubProps> = ({
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
           <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200/80 dark:border-slate-800">
-            <p className="font-semibold text-slate-900 dark:text-white mb-1">1. Template Artha</p>
+            <p className="font-semibold text-slate-900 dark:text-white mb-1">1. Template 101Financial</p>
             <p>Tanggal, Jam, Jenis, Akun, Kategori, Subkategori, Catatan, Nominal, Aksi, Unit, Harga.</p>
           </div>
           <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#0B0F1A] border border-slate-200/80 dark:border-slate-800">
